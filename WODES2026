@@ -3,14 +3,13 @@ import matplotlib.pyplot as plt
 import random
 from typing import Dict, List, Tuple, Any
 
-# --- Simulation Parameters (N=2000 in original) ---
+# --- Simulation Parameters ---
 N_TRIALS = 2000
 EPSILON = 0.1  # Simultaneity threshold
 P_MISSING_O2 = 0.15
 P_EXTRA = 0.05
 
 # --- Model Constraints ---
-# T_intervals: Temporal constraints between sequential Operational events (O_i, O_j): (low, high)
 T_INTERVALS: Dict[Tuple[str, str], Tuple[float, float]] = {
     ("O1", "O2"): (1.0, 2.0),
     ("O2", "O3"): (2.0, 3.0),
@@ -20,7 +19,6 @@ T_INTERVALS: Dict[Tuple[str, str], Tuple[float, float]] = {
 }
 OPERATIONAL_EVENTS = ["O1", "O2", "O3", "O4", "O5", "O6"]
 
-# A_intervals: Temporal constraints for Auxiliary (Alarm) events (A_i, Root_O_j): (low, high)
 A_INTERVALS: Dict[str, Tuple[str, Tuple[float, float]]] = {
     "A1": ("O1", (1.0, 2.0)),
     "A2": ("O2", (2.0, 3.0)),
@@ -29,58 +27,41 @@ A_INTERVALS: Dict[str, Tuple[str, Tuple[float, float]]] = {
 }
 
 # --- Event Sequence Generation ---
-
 def sample_sequence() -> List[Tuple[str, float]]:
     """Generates one event trace based on model constraints and noise parameters."""
-    
-    # 1. Generate Nominal Operational Timestamps (t_O)
     t_op: Dict[str, float] = {"O1": 0.0}
     for (a, b), (low, high) in T_INTERVALS.items():
-        # Ensure 'a' is in the dictionary (guaranteed by sequence order)
         t_op[b] = t_op[a] + np.random.uniform(low, high)
     
-    # 2. Apply uniform temporal noise to all operational events
     for event in t_op:
         t_op[event] += np.random.uniform(-0.1, 0.1)
 
-    # 3. Construct the sequence with optional O2 loss
     sequence: List[Tuple[str, float]] = []
     for event in OPERATIONAL_EVENTS:
         if event == "O2" and random.random() < P_MISSING_O2:
             continue
         sequence.append((event, t_op[event]))
     
-    # 4. Generate Auxiliary (Alarm) Events
     for alarm, (root, (low, high)) in A_INTERVALS.items():
         if root in t_op:
             t_alarm = t_op[root] + np.random.uniform(low, high)
-            # Apply temporal noise to the alarm event
             t_alarm += np.random.uniform(-0.1, 0.1)
             sequence.append((alarm, t_alarm))
     
-    # 5. Inject Extra Event (False Positive)
     if random.random() < P_EXTRA:
-        # Extra event tied to O3's time, as in original code
         t_extra = t_op["O3"] + np.random.uniform(0.1, 0.3)
         sequence.append(("EXTRA", t_extra))
     
-    # 6. Sort by timestamp (chronological order)
     sequence.sort(key=lambda x: x[1])
     return sequence
 
 # --- Metric Functions ---
-
 def calculate_vnet_recognition(seq: List[Tuple[str, float]]) -> float:
-    """
-    Calculates the V-net Recognition Score: Fraction of satisfied temporal constraints.
-    Corresponds to the V-net's ability to maintain partial validity.
-    """
     tdict = {e: t for e, t in seq}
     satisfied_constraints = 0
     total_constraints = len(T_INTERVALS)
     
     for (a, b), (low, high) in T_INTERVALS.items():
-        # V-net checks constraint satisfaction only if BOTH events were observed
         if a in tdict and b in tdict:
             dt = tdict[b] - tdict[a]
             if low <= dt <= high:
@@ -89,34 +70,19 @@ def calculate_vnet_recognition(seq: List[Tuple[str, float]]) -> float:
     return satisfied_constraints / total_constraints
 
 def calculate_tpn_recognition(seq: List[Tuple[str, float]]) -> float:
-    """
-    Calculates the TPN Recognition Score (Sequential Match): Fraction of expected operational
-    events that appear in the correct sequential order.
-    Corresponds to TPN's sensitivity to structural/sequential integrity.
-    """
     expected = OPERATIONAL_EVENTS
-    # Filter observed operational events
     observed = [e for e, _ in seq if e in expected]
     
     match_count = 0
-    # Match the prefix of observed events against the expected sequence
     for a, b in zip(expected, observed):
         if a == b:
             match_count += 1
-        else:
-            # TPN matching usually stops on the first deviation (O2 loss), 
-            # but the original code counted all matches up to the end of the shorter sequence.
-            # We preserve the original logic for direct comparison.
-            pass
-            
     return match_count / len(expected)
 
 def calculate_simultaneity(seq: List[Tuple[str, float]]) -> int:
-    """Counts pairs of events occurring within the EPSILON threshold."""
     count = 0
     timestamps = [t for _, t in seq]
     
-    # Use nested loops (O(N^2)) as N is small (approx 10-12 events)
     for i in range(len(timestamps)):
         for j in range(i + 1, len(timestamps)):
             if abs(timestamps[i] - timestamps[j]) <= EPSILON:
@@ -125,7 +91,6 @@ def calculate_simultaneity(seq: List[Tuple[str, float]]) -> int:
     return count
 
 def calculate_false_positives(seq: List[Tuple[str, float]]) -> int:
-    """Counts the number of explicitly defined 'EXTRA' events."""
     return sum(1 for e, _ in seq if e == "EXTRA")
 
 # --- Simulation Execution ---
@@ -142,10 +107,72 @@ for _ in range(N_TRIALS):
     sim_vals.append(calculate_simultaneity(s))
     fp_vals.append(calculate_false_positives(s))
 
-    # Collect interval samples for the distribution plot
     ts = {e: t for e, t in s if e in OPERATIONAL_EVENTS}
     for (a, b), _ in T_INTERVALS.items():
         if a in ts and b in ts:
             interval_samples.append(ts[b] - ts[a])
 
-print("Monte Carlo simulation completed successfully with improved code structure.")
+# --- Plotting (English Labels) ---
+plt.figure(figsize=(14, 10))
+
+# VNET Recognition
+plt.subplot(2, 2, 1)
+plt.hist(vnet_vals, bins=np.linspace(0, 1, 11), edgecolor='black', alpha=0.7, color='skyblue')
+plt.title('Distribution of VNET Recognition Score')
+plt.xlabel('Fraction of Satisfied Temporal Constraints')
+plt.ylabel('Frequency')
+plt.axvline(np.mean(vnet_vals), color='red', linestyle='dashed', linewidth=1)
+plt.text(np.mean(vnet_vals) + 0.05, plt.ylim()[1]*0.9, f'Mean: {np.mean(vnet_vals):.3f}', color='red')
+plt.grid(axis='y', alpha=0.5)
+
+# TPN Recognition
+plt.subplot(2, 2, 2)
+plt.hist(tpn_vals, bins=np.linspace(0, 1, 11), edgecolor='black', alpha=0.7, color='lightgreen')
+plt.title('Distribution of TPN Recognition Score')
+plt.xlabel('Fraction of Correct Sequential Order')
+plt.ylabel('Frequency')
+plt.axvline(np.mean(tpn_vals), color='red', linestyle='dashed', linewidth=1)
+plt.text(np.mean(tpn_vals) + 0.05, plt.ylim()[1]*0.9, f'Mean: {np.mean(tpn_vals):.3f}', color='red')
+plt.grid(axis='y', alpha=0.5)
+
+# Simultaneity
+plt.subplot(2, 2, 3)
+plt.hist(sim_vals, bins=max(sim_vals) if max(sim_vals) > 0 else 1, edgecolor='black', alpha=0.7, color='gold')
+plt.title('Distribution of Simultaneity Score')
+plt.xlabel(f'Event Pairs with $|\Delta t| \\leq$ {EPSILON}')
+plt.ylabel('Frequency')
+plt.axvline(np.mean(sim_vals), color='red', linestyle='dashed', linewidth=1)
+plt.text(np.mean(sim_vals) + 0.5, plt.ylim()[1]*0.9, f'Mean: {np.mean(sim_vals):.3f}', color='red')
+plt.grid(axis='y', alpha=0.5)
+
+# False Positives
+plt.subplot(2, 2, 4)
+plt.hist(fp_vals, bins=np.arange(3), align='left', edgecolor='black', alpha=0.7, color='salmon')
+plt.title('Distribution of False Positives (EXTRA)')
+plt.xlabel('Number of EXTRA Events')
+plt.ylabel('Frequency')
+plt.xticks([0, 1, 2])
+plt.axvline(np.mean(fp_vals), color='red', linestyle='dashed', linewidth=1)
+plt.text(np.mean(fp_vals) + 0.05, plt.ylim()[1]*0.9, f'Mean: {np.mean(fp_vals):.3f}', color='red')
+plt.grid(axis='y', alpha=0.5)
+
+plt.tight_layout()
+plt.savefig('montecarlo_metrics_en.png')
+plt.close()
+
+# Histogram of Interval Samples
+plt.figure(figsize=(8, 6))
+
+plt.hist(interval_samples, bins=50, density=True, edgecolor='black', alpha=0.6, color='mediumpurple')
+plt.title('Distribution of Sampled Time Intervals ($\\Delta t$)')
+plt.xlabel('Time Difference ($t(b) - t(a)$)')
+plt.ylabel('Density')
+
+# Mark the ideal limits
+plt.axvspan(1, 3, color='gray', alpha=0.2, label='Ideal Range (1 to 3)')
+plt.axvline(np.mean(interval_samples), color='red', linestyle='dashed', linewidth=1, label=f'Sampled Mean: {np.mean(interval_samples):.3f}')
+
+plt.legend()
+plt.grid(axis='y', alpha=0.5)
+plt.savefig('interval_distribution_en.png')
+plt.close()
