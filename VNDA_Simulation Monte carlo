@@ -1,0 +1,256 @@
+import numpy as np
+import random
+import time
+from collections import Counter
+from sklearn.cluster import KMeans, DBSCAN
+
+
+# ============================================================
+# 1. Nominal Trace Generator (Per Case Study)
+# ============================================================
+
+def generate_nominal_trace(pattern, m):
+    """
+    pattern: list of tuples (event, delta_min, delta_max)
+    m: desired trace length (ignored if using fixed pattern)
+    
+    For deterministic V-nets, m = len(pattern).
+    """
+    trace = []
+    t = 0.0
+    for (e, dmin, dmax) in pattern:
+        delay = np.random.uniform(dmin, dmax)
+        t += delay
+        trace.append((e, t))
+    return trace
+
+
+# ============================================================
+# 2. Perturbation Operators
+# ============================================================
+
+def apply_missing(trace, p_missing):
+    return [(e, t) for (e, t) in trace if random.random() > p_missing]
+
+
+def apply_extra_events(trace, p_extra, extra_pool=None):
+    if extra_pool is None:
+        extra_pool = list({e for (e, _) in trace})
+    augmented = []
+    for (e, t) in trace:
+        augmented.append((e, t))
+        if random.random() < p_extra:
+            e_extra = random.choice(extra_pool)
+            t_extra = t + np.random.uniform(-0.2, 0.2)
+            augmented.append((e_extra, t_extra))
+    return sorted(augmented, key=lambda x: x[1])
+
+
+def apply_noise(trace, eta):
+    return [(e, t + np.random.uniform(-eta, eta)) for (e, t) in trace]
+
+
+# ============================================================
+# 3. VNDA Evaluator for V-net Recognition
+# ============================================================
+
+def evaluate_vnet(trace, vnet):
+    """
+    vnet = {
+        'edges': {(e1, e2): (dmin, dmax)},
+        'E': set of events,
+        'INIT': ...,
+        'END': ...
+    }
+    """
+    if len(trace) < 2:
+        return 0, 1  # Not recognized, FP
+    
+    recognized = True
+    fp = 0
+
+    for (e1, t1), (e2, t2) in zip(trace[:-1], trace[1:]):
+        dt = t2 - t1
+        if (e1, e2) not in vnet['edges']:
+            fp += 1
+            recognized = False
+        else:
+            dmin, dmax = vnet['edges'][(e1, e2)]
+            if not (dmin <= dt <= dmax):
+                recognized = False
+    
+    return int(recognized), fp
+
+
+# ============================================================
+# 4. Similarity Metric
+# ============================================================
+
+def similarity_score(trace, nominal_pattern):
+    """
+    Simple event-order similarity:
+    Jaccard on event sets + order consistency
+    """
+    events_trace = [e for (e, _) in trace]
+    events_nominal = [e for (e, _, _) in nominal_pattern]
+
+    set_sim = len(set(events_trace) & set(events_nominal)) / \
+              len(set(events_trace) | set(events_nominal))
+
+    order_matches = sum(1 for a, b in zip(events_trace, events_nominal) if a == b)
+    order_sim = order_matches / max(1, len(events_nominal))
+
+    return 0.6 * set_sim + 0.4 * order_sim
+
+
+# ============================================================
+# 5. Ablation Variants of VNDA
+# ============================================================
+
+def remove_R(vnet):
+    v = dict(vnet)
+    v['R'] = None
+    return v
+
+def remove_Frec(vnet):
+    v = dict(vnet)
+    v['Frec'] = None
+    return v
+
+
+# ============================================================
+# 6. Monte Carlo Simulation for One Case Study
+# ============================================================
+
+def monte_carlo_case(pattern, vnet, Gmiss, Gextra, Gnoise, N, m):
+    results = []
+
+    for p_miss in Gmiss:
+        for p_extra in Gextra:
+            for eta in Gnoise:
+
+                rec_list = []
+                fp_list = []
+                sim_list = []
+                times = []
+
+                for _ in range(N):
+                    t0 = time.time()
+
+                    sigma = generate_nominal_trace(pattern, m)
+                    sigma = apply_missing(sigma, p_miss)
+                    sigma = apply_extra_events(sigma, p_extra)
+                    sigma = apply_noise(sigma, eta)
+
+                    rec, fp = evaluate_vnet(sigma, vnet)
+                    sim = similarity_score(sigma, pattern)
+
+                    rec_list.append(rec)
+                    fp_list.append(fp)
+                    sim_list.append(sim)
+                    times.append(time.time() - t0)
+
+                results.append({
+                    'p_missing': p_miss,
+                    'p_extra': p_extra,
+                    'noise': eta,
+                    'Rec': np.mean(rec_list),
+                    'FP': np.mean(fp_list),
+                    'SimScore': np.mean(sim_list),
+                    'Time': np.mean(times)
+                })
+
+    return results
+
+
+# ============================================================
+# 7. Scalability Experiments
+# ============================================================
+
+def scalability_test(pattern, vnet, Ns, Ms):
+    out = []
+    for N in Ns:
+        for m in Ms:
+            start = time.time()
+            for _ in range(N):
+                sigma = generate_nominal_trace(pattern, m)
+                evaluate_vnet(sigma, vnet)
+            runtime = time.time() - start
+
+            out.append({
+                'N': N,
+                'm': m,
+                'runtime': runtime
+            })
+    return out
+
+
+# ============================================================
+# 8. Ablation Experiments
+# ============================================================
+
+def ablation_experiment(pattern, vnet, N, p_missing=0.1, p_extra=0.1, noise=0.1):
+    variants = {
+        "full": vnet,
+        "-R": remove_R(vnet),
+        "-Frec": remove_Frec(vnet)
+    }
+    metrics = {}
+
+    for name, v in variants.items():
+        rec_list = []
+        fp_list = []
+
+        for _ in range(N):
+            sigma = generate_nominal_trace(pattern, m=len(pattern))
+            sigma = apply_missing(sigma, p_missing)
+            sigma = apply_extra_events(sigma, p_extra)
+            sigma = apply_noise(sigma, noise)
+
+            rec, fp = evaluate_vnet(sigma, v)
+            rec_list.append(rec)
+            fp_list.append(fp)
+
+        metrics[name] = {
+            "Rec": np.mean(rec_list),
+            "FP": np.mean(fp_list)
+        }
+    return metrics
+
+
+# ============================================================
+# 9. Scenario Clustering
+# ============================================================
+
+def compute_features(trace):
+    simult = 0
+    extra = 0
+    delays = []
+
+    for (e1, t1), (e2, t2) in zip(trace[:-1], trace[1:]):
+        dt = t2 - t1
+        delays.append(dt)
+        if abs(dt) < 0.001:
+            simult += 1
+        if e2 == e1:
+            extra += 1
+
+    return [
+        simult,
+        extra,
+        np.mean(delays) if delays else 0,
+        np.max(delays) if delays else 0
+    ]
+
+
+def clustering_analysis(traces, k=4):
+    X = np.array([compute_features(t) for t in traces])
+
+    kmeans = KMeans(n_clusters=k).fit(X)
+    dbscan = DBSCAN().fit(X)
+
+    return {
+        'kmeans_labels': kmeans.labels_,
+        'dbscan_labels': dbscan.labels_,
+        'features': X
+    }
